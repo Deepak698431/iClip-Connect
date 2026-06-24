@@ -19,8 +19,25 @@ using namespace Gdiplus;
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "ole32.lib")
 
-int main() {
+int main(int argc, char* argv[]) {
     FreeConsole();
+    
+    // ==============================================================================
+    // SECURITY GATEKEEPER
+    // ==============================================================================
+    std::string MASTER_PASSWORD = "";
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "-pw" && i + 1 < argc) {
+            MASTER_PASSWORD = argv[i + 1];
+            break;
+        }
+    }
+
+    if (MASTER_PASSWORD.empty()) {
+        MessageBoxA(NULL, "Server failed to start: You must provide a password using the -pw flag.", "Security Error", MB_ICONERROR | MB_OK);
+        return 1; 
+    }
+
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
     ULONG_PTR gdiplusToken;
     Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
@@ -30,7 +47,14 @@ int main() {
     // ==============================================================================
     // ENDPOINT 1: PULL (Snipping Tool & Text)
     // ==============================================================================
-    svr.Get("/pull", [](const httplib::Request& req, httplib::Response& res) {
+    // Notice the [&] so it can read MASTER_PASSWORD
+    svr.Get("/pull", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_header("X-Auth-Token") || req.get_header_value("X-Auth-Token") != MASTER_PASSWORD) {
+            res.status = 401;
+            res.set_content("Access Denied", "text/plain");
+            return;
+        }
+
         if (OpenClipboard(GetDesktopWindow())) {
             if (IsClipboardFormatAvailable(CF_BITMAP)) {
                 HANDLE hData = GetClipboardData(CF_BITMAP);
@@ -75,7 +99,13 @@ int main() {
     // ==============================================================================
     // ENDPOINT 2: PUSH TEXT
     // ==============================================================================
-    svr.Post("/push", [](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/push", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_header("X-Auth-Token") || req.get_header_value("X-Auth-Token") != MASTER_PASSWORD) {
+            res.status = 401;
+            res.set_content("Access Denied", "text/plain");
+            return;
+        }
+
         std::string new_text = req.body; 
         if (OpenClipboard(nullptr)) {
             EmptyClipboard(); 
@@ -96,7 +126,13 @@ int main() {
     // ==============================================================================
     // ENDPOINT 3: PUSH IMAGE (Triple Format)
     // ==============================================================================
-    svr.Post("/push_image", [](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/push_image", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_header("X-Auth-Token") || req.get_header_value("X-Auth-Token") != MASTER_PASSWORD) {
+            res.status = 401;
+            res.set_content("Access Denied", "text/plain");
+            return;
+        }
+
         const std::string& image_data = req.body;
         if (image_data.empty()) {
             res.status = 400;
@@ -123,67 +159,32 @@ int main() {
             // ----------------------------------------------------------------------
             auto now = std::chrono::system_clock::now();
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-            // std::string finalPath = "C:\\Users\\Deepa\\OneDrive\\Pictures\\Synced images\\bridge_img_" + std::to_string(ms) + ".png";
-            auto now = std::chrono::system_clock::now();
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
             
-            // 1. Ask Windows for the TRUE Pictures folder path (Handles OneDrive automatically)
             char picturesPath[MAX_PATH];
             std::string finalPath = "";
             
             if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYPICTURES, NULL, 0, picturesPath))) {
                 std::string baseFolder = std::string(picturesPath) + "\\Synced images";
-                
-                // 2. Safely create the directory (does nothing if it already exists)
                 CreateDirectoryA(baseFolder.c_str(), NULL); 
-                
-                // 3. Build the final file name
                 finalPath = baseFolder + "\\bridge_img_" + std::to_string(ms) + ".png";
             }
 
-            // 4. Save the file using the dynamic path
             std::ofstream outfile(finalPath, std::ios::binary);
             if (outfile.is_open()) {
                 outfile.write(image_data.data(), image_data.size());
                 outfile.close();
 
-                // Convert ANSI path to Wide String (Unicode)
                 int wchars_num = MultiByteToWideChar(CP_UTF8, 0, finalPath.c_str(), -1, NULL, 0);
                 std::vector<wchar_t> wPath(wchars_num);
                 MultiByteToWideChar(CP_UTF8, 0, finalPath.c_str(), -1, &wPath[0], wchars_num);
 
-                // Allocate memory for Unicode DROPFILES
+                // <--- FIX 2: Tells apps this is a Unicode string
                 SIZE_T dropSize = sizeof(DROPFILES) + (wchars_num + 1) * sizeof(wchar_t);
                 HGLOBAL hDrop = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, dropSize); 
                 if (hDrop) {
                     DROPFILES* pDrop = (DROPFILES*)GlobalLock(hDrop);
                     pDrop->pFiles = sizeof(DROPFILES);
                     pDrop->fWide = TRUE; 
-                    memcpy((char*)pDrop + sizeof(DROPFILES), &wPath[0], wchars_num * sizeof(wchar_t));
-                    GlobalUnlock(hDrop);
-                    SetClipboardData(CF_HDROP, hDrop);
-                }
-            } else {
-                std::cout << "ERROR: Could not save to folder!" << std::endl;
-            }
-
-            std::ofstream outfile(finalPath, std::ios::binary);
-            if (outfile.is_open()) {
-                outfile.write(image_data.data(), image_data.size());
-                outfile.close();
-
-                // Convert ANSI path to Wide String (Unicode)
-                int wchars_num = MultiByteToWideChar(CP_UTF8, 0, finalPath.c_str(), -1, NULL, 0);
-                std::vector<wchar_t> wPath(wchars_num);
-                MultiByteToWideChar(CP_UTF8, 0, finalPath.c_str(), -1, &wPath[0], wchars_num);
-
-                // Allocate memory for Unicode DROPFILES (+1 for double null terminator)
-                SIZE_T dropSize = sizeof(DROPFILES) + (wchars_num + 1) * sizeof(wchar_t);
-                HGLOBAL hDrop = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, dropSize); 
-                if (hDrop) {
-                    DROPFILES* pDrop = (DROPFILES*)GlobalLock(hDrop);
-                    pDrop->pFiles = sizeof(DROPFILES);
-                    pDrop->fWide = TRUE; // <--- FIX 2: Tells apps this is a Unicode string
                     memcpy((char*)pDrop + sizeof(DROPFILES), &wPath[0], wchars_num * sizeof(wchar_t));
                     GlobalUnlock(hDrop);
                     SetClipboardData(CF_HDROP, hDrop);
@@ -204,14 +205,12 @@ int main() {
                     if (bitmap && bitmap->GetLastStatus() == Gdiplus::Ok) {
                         
                         HBITMAP hBitmap;
-                        // Strip alpha channel by rendering onto a solid white background
                         bitmap->GetHBITMAP(Color(255, 255, 255), &hBitmap);
 
                         HDC hdc = GetDC(NULL);
                         BITMAP bmp;
                         GetObject(hBitmap, sizeof(BITMAP), &bmp);
 
-                        // Mathematically pure DIB header
                         BITMAPINFOHEADER bi = {0};
                         bi.biSize = sizeof(BITMAPINFOHEADER);
                         bi.biWidth = bmp.bmWidth;
@@ -235,7 +234,6 @@ int main() {
 
                         // <--- FIX 3: Hand the lightweight handle directly to Win+V
                         SetClipboardData(CF_BITMAP, hBitmap); 
-                        // Windows takes ownership of hBitmap, do not delete it!
                     }
                     if (bitmap) delete bitmap;
                     pStream->Release();
@@ -243,12 +241,10 @@ int main() {
             }
 
             CloseClipboard();
-            std::cout << "Image successfully published to all clipboards!" << std::endl;
         }
         res.set_content("Image Success", "text/plain");
     });
 
-    std::cout << "Clipboard Server running on port 8080..." << std::endl;
     svr.listen("0.0.0.0", 8080);
     
     Gdiplus::GdiplusShutdown(gdiplusToken); 
