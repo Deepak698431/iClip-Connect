@@ -1,1 +1,0 @@
-start "" "server.exe" -pw AppleClipboard-Sync

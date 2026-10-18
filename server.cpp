@@ -10,14 +10,121 @@
 #include <string>
 #include <vector>
 #include <fstream>    
-#include <chrono>     
+#include <chrono>   
 #include "httplib.h"
 
 using namespace Gdiplus;
 
+// helaps to find the linking of windows socket library
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "ole32.lib")
+
+// store url and text before ios take it;
+std::string stored_viewport_payload = "";
+
+// ==============================================================================
+// VIEWPORT HARDWARE AUTOMATOR
+// ==============================================================================
+void HandleViewportSync(std::string url, std::string text) {
+    // 1. Convert incoming iOS UTF-8 text to Windows UTF-16 Wide String
+    int wchars_num = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, NULL, 0);
+    std::wstring wtext(wchars_num, 0);
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &wtext[0], wchars_num);
+
+    // 2. Stage text to clipboard using CF_UNICODETEXT
+    if (OpenClipboard(NULL)) {
+        EmptyClipboard();
+        
+        // memSize must include the +1 for the null terminator in memory
+        size_t memSize = (wtext.length() + 1) * sizeof(wchar_t);
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, memSize);
+        
+        if (hMem) {
+            memcpy(GlobalLock(hMem), wtext.c_str(), memSize);
+            GlobalUnlock(hMem);
+            SetClipboardData(CF_UNICODETEXT, hMem); // <--- Use Unicode format
+        }
+        CloseClipboard();
+    }
+
+    // 3. Build the message using Wide Strings (Notice the 'L' before the quotes)
+    std::wstring wmsg = L"Do you want to sync the viewport to this text?\n\n\"" + wtext + L"\"";
+    
+    // 4. Use MessageBoxW ('W' for Wide/Unicode) instead of MessageBoxA
+    int userChoice = MessageBoxW(NULL, wmsg.c_str(), L"Incoming Viewport Sync", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST);
+
+    if (userChoice == IDYES) {
+
+        //Put only the text into clipbaord
+        if (OpenClipboard(NULL)) {
+            EmptyClipboard();
+            
+            // memSize must include the +1 for the null terminator in memory
+            size_t memSize = (wtext.length() + 1) * sizeof(wchar_t);
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, memSize);
+            
+            if (hMem) {
+                memcpy(GlobalLock(hMem), wtext.c_str(), memSize);
+                GlobalUnlock(hMem);
+                
+                // Use Unicode format so special characters and emojis paste perfectly
+                SetClipboardData(CF_UNICODETEXT, hMem); 
+            }
+            CloseClipboard();
+        }
+
+        // Launch Brave
+        std::string command = "start brave \"" + url + "\"";
+        system(command.c_str());
+
+        // Wait for page to load
+        Sleep(3500); 
+
+        INPUT inputs[4] = {0};
+        
+        // Press Ctrl + F
+        inputs[0].type = INPUT_KEYBOARD; inputs[0].ki.wVk = VK_CONTROL;
+        inputs[1].type = INPUT_KEYBOARD; inputs[1].ki.wVk = 'F';
+        inputs[2].type = INPUT_KEYBOARD; inputs[2].ki.wVk = 'F'; inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputs[3].type = INPUT_KEYBOARD; inputs[3].ki.wVk = VK_CONTROL; inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(4, inputs, sizeof(INPUT));
+
+        Sleep(300); 
+
+        // Press Ctrl + V
+        inputs[0].type = INPUT_KEYBOARD; inputs[0].ki.wVk = VK_CONTROL;
+        inputs[1].type = INPUT_KEYBOARD; inputs[1].ki.wVk = 'V';
+        inputs[2].type = INPUT_KEYBOARD; inputs[2].ki.wVk = 'V'; inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+        inputs[3].type = INPUT_KEYBOARD; inputs[3].ki.wVk = VK_CONTROL; inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(4, inputs, sizeof(INPUT));
+
+        Sleep(100);
+
+        // Press Enter
+        inputs[0].type = INPUT_KEYBOARD; inputs[0].ki.wVk = VK_RETURN;
+        inputs[1].type = INPUT_KEYBOARD; inputs[1].ki.wVk = VK_RETURN; inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, inputs, sizeof(INPUT));
+
+        // Wait 4 seconds, then press Escape to clear highlight
+        Sleep(4000);
+        INPUT esc[2] = {0};
+        esc[0].type = INPUT_KEYBOARD; esc[0].ki.wVk = VK_ESCAPE;
+        esc[1].type = INPUT_KEYBOARD; esc[1].ki.wVk = VK_ESCAPE; esc[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, esc, sizeof(INPUT));
+    }
+}
+
+struct ViewportSyncArgs {
+    std::string url;
+    std::string text;
+};
+
+DWORD WINAPI RunViewportSync(LPVOID parameter) {
+    std::unique_ptr<ViewportSyncArgs> args(static_cast<ViewportSyncArgs*>(parameter));
+    HandleViewportSync(args->url, args->text);
+    return 0;
+}
 
 int main(int argc, char* argv[]) {
     FreeConsole();
@@ -107,24 +214,109 @@ int main(int argc, char* argv[]) {
         }
 
         std::string new_text = req.body; 
+        
         if (OpenClipboard(nullptr)) {
             EmptyClipboard(); 
-            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, new_text.length() + 1);
+            
+            // 1. Convert incoming iOS UTF-8 text to Windows UTF-16 Wide String
+            int wchars_num = MultiByteToWideChar(CP_UTF8, 0, new_text.c_str(), -1, NULL, 0);
+            std::wstring wtext(wchars_num, 0);
+            MultiByteToWideChar(CP_UTF8, 0, new_text.c_str(), -1, &wtext[0], wchars_num);
+
+            // 2. Allocate memory specifically sized for wide characters
+            size_t memSize = wchars_num * sizeof(wchar_t);
+            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, memSize);
+            
             if (hMem) {
-                char* pMem = static_cast<char*>(GlobalLock(hMem));
-                if (pMem) {
-                    memcpy(pMem, new_text.c_str(), new_text.length() + 1);
-                    GlobalUnlock(hMem);
-                    SetClipboardData(CF_TEXT, hMem);
-                }
+                // 3. Lock, copy, and set using the Unicode format flag
+                memcpy(GlobalLock(hMem), wtext.c_str(), memSize);
+                GlobalUnlock(hMem);
+                SetClipboardData(CF_UNICODETEXT, hMem); // <--- Upgraded to CF_UNICODETEXT
             }
             CloseClipboard();
         }
         res.set_content("Success", "text/plain");
     });
 
+   // ==============================================================================
+// ENDPOINT 3: PUSH VIEWPORT (URL + Text)
+// ==============================================================================
+svr.Post("/push_viewport", [&](const httplib::Request& req, httplib::Response& res) {
+    if (!req.has_header("X-Auth-Token") || req.get_header_value("X-Auth-Token") != MASTER_PASSWORD) {
+        res.status = 401;
+        res.set_content("Access Denied", "text/plain");
+        return;
+    }
+
+    std::string payload = req.body;
+    size_t delimiter = payload.find("|||");
+    size_t encoded_delimiter = payload.find("%7C%7C%7C");
+    
+    std::string url = "";
+    std::string text = "";
+
+    // Smart-parse to handle iOS automatic URL-encoding
+    if (encoded_delimiter != std::string::npos) {
+        url = payload.substr(0, encoded_delimiter);
+        text = payload.substr(encoded_delimiter + 9); 
+    } else if (delimiter != std::string::npos) {
+        url = payload.substr(0, delimiter);
+        text = payload.substr(delimiter + 3); 
+    }
+    
+    if (!url.empty() && !text.empty()) {
+        auto* args = new ViewportSyncArgs{url, text};
+        HANDLE thread = CreateThread(nullptr, 0, RunViewportSync, args, 0, nullptr);
+        
+        if (thread) {
+            CloseHandle(thread); 
+            res.set_content("Viewport Sync Triggered", "text/plain");
+        } else {
+            delete args; 
+            res.status = 500;
+            res.set_content("Failed to start viewport sync", "text/plain");
+        }
+    } else {
+        res.status = 400;
+        res.set_content("Invalid Payload Format", "text/plain");
+    }
+});
+
     // ==============================================================================
-    // ENDPOINT 3: PUSH IMAGE (Triple Format)
+    // ENDPOINT 4: STORE VIEWPORT (Windows -> Server Memory)
+    // ==============================================================================
+    svr.Post("/store_viewport", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_header("X-Auth-Token") || req.get_header_value("X-Auth-Token") != MASTER_PASSWORD) {
+            res.status = 401; 
+            res.set_content("Access Denied", "text/plain"); 
+            return;
+        }
+        
+        stored_viewport_payload = req.body; 
+        res.set_content("Viewport Stored", "text/plain");
+    });
+
+    // ==============================================================================
+    // ENDPOINT 5: PULL VIEWPORT (Server Memory -> iOS)
+    // ==============================================================================
+    svr.Get("/pull_viewport", [&](const httplib::Request& req, httplib::Response& res) {
+        if (!req.has_header("X-Auth-Token") || req.get_header_value("X-Auth-Token") != MASTER_PASSWORD) {
+            res.status = 401; 
+            res.set_content("Access Denied", "text/plain"); 
+            return;
+        }
+        
+        if (stored_viewport_payload.empty()) {
+            res.status = 404; 
+            res.set_content("No viewport staged", "text/plain");
+        } else {
+            res.set_content(stored_viewport_payload, "text/plain");
+            stored_viewport_payload = ""; // Instantly wipe payload after sending
+        }
+    });
+
+    // ==============================================================================
+    // ENDPOINT 6: PUSH IMAGE (Triple Format)
     // ==============================================================================
     svr.Post("/push_image", [&](const httplib::Request& req, httplib::Response& res) {
         if (!req.has_header("X-Auth-Token") || req.get_header_value("X-Auth-Token") != MASTER_PASSWORD) {
@@ -144,7 +336,7 @@ int main(int argc, char* argv[]) {
             EmptyClipboard();
 
             // ----------------------------------------------------------------------
-            // 1. Web PNG (Fallback for Chromium)
+            // 1. Web PNG (Fallback for Chromium browsers)
             // ----------------------------------------------------------------------
             UINT cfPNG = RegisterClipboardFormatA("PNG");
             HGLOBAL hPngMem = GlobalAlloc(GMEM_MOVEABLE, image_data.size());
@@ -154,45 +346,9 @@ int main(int argc, char* argv[]) {
                 SetClipboardData(cfPNG, hPngMem);
             }
 
-            // ----------------------------------------------------------------------
-            // 2. CF_HDROP (UNICODE FIX for Discord "File is empty" bug)
-            // ----------------------------------------------------------------------
-            auto now = std::chrono::system_clock::now();
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
             
-            char picturesPath[MAX_PATH];
-            std::string finalPath = "";
-            
-            if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYPICTURES, NULL, 0, picturesPath))) {
-                std::string baseFolder = std::string(picturesPath) + "\\Synced images";
-                CreateDirectoryA(baseFolder.c_str(), NULL); 
-                finalPath = baseFolder + "\\bridge_img_" + std::to_string(ms) + ".png";
-            }
-
-            std::ofstream outfile(finalPath, std::ios::binary);
-            if (outfile.is_open()) {
-                outfile.write(image_data.data(), image_data.size());
-                outfile.close();
-
-                int wchars_num = MultiByteToWideChar(CP_UTF8, 0, finalPath.c_str(), -1, NULL, 0);
-                std::vector<wchar_t> wPath(wchars_num);
-                MultiByteToWideChar(CP_UTF8, 0, finalPath.c_str(), -1, &wPath[0], wchars_num);
-
-                // <--- FIX 2: Tells apps this is a Unicode string
-                SIZE_T dropSize = sizeof(DROPFILES) + (wchars_num + 1) * sizeof(wchar_t);
-                HGLOBAL hDrop = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, dropSize); 
-                if (hDrop) {
-                    DROPFILES* pDrop = (DROPFILES*)GlobalLock(hDrop);
-                    pDrop->pFiles = sizeof(DROPFILES);
-                    pDrop->fWide = TRUE; 
-                    memcpy((char*)pDrop + sizeof(DROPFILES), &wPath[0], wchars_num * sizeof(wchar_t));
-                    GlobalUnlock(hDrop);
-                    SetClipboardData(CF_HDROP, hDrop);
-                }
-            }
-
             // ----------------------------------------------------------------------
-            // 3. CF_DIB (For Legacy) & CF_BITMAP (For Win+V Thumbnails)
+            // 2. CF_DIB (The 100% Reliable Fix for Win+V Thumbnails)
             // ----------------------------------------------------------------------
             HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, image_data.size());
             if (hMem) {
@@ -204,36 +360,36 @@ int main(int argc, char* argv[]) {
                     Bitmap* bitmap = Bitmap::FromStream(pStream);
                     if (bitmap && bitmap->GetLastStatus() == Gdiplus::Ok) {
                         
-                        HBITMAP hBitmap;
-                        bitmap->GetHBITMAP(Color(255, 255, 255), &hBitmap);
-
-                        HDC hdc = GetDC(NULL);
-                        BITMAP bmp;
-                        GetObject(hBitmap, sizeof(BITMAP), &bmp);
-
-                        BITMAPINFOHEADER bi = {0};
-                        bi.biSize = sizeof(BITMAPINFOHEADER);
-                        bi.biWidth = bmp.bmWidth;
-                        bi.biHeight = bmp.bmHeight;
-                        bi.biPlanes = 1;
-                        bi.biBitCount = 24;
-                        bi.biCompression = BI_RGB;
-                        
-                        DWORD stride = ((bmp.bmWidth * 24 + 31) / 32) * 4;
-                        bi.biSizeImage = stride * bmp.bmHeight;
-
-                        HGLOBAL hDIB = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + bi.biSizeImage);
-                        if (hDIB) {
-                            BITMAPINFOHEADER* pDIB = (BITMAPINFOHEADER*)GlobalLock(hDIB);
-                            *pDIB = bi;
-                            GetDIBits(hdc, hBitmap, 0, bmp.bmHeight, (BYTE*)pDIB + sizeof(BITMAPINFOHEADER), (BITMAPINFO*)pDIB, DIB_RGB_COLORS);
-                            GlobalUnlock(hDIB);
-                            SetClipboardData(CF_DIB, hDIB);
+                        // Save the GDI+ Bitmap to an in-memory BMP stream
+                        IStream* pBmpStream = NULL;
+                        if (CreateStreamOnHGlobal(NULL, TRUE, &pBmpStream) == 0) {
+                            CLSID bmpClsid;
+                            CLSIDFromString(L"{557cf400-1a04-11d3-9a73-0000f81ef32e}", &bmpClsid); // BMP Encoder
+                            
+                            if (bitmap->Save(pBmpStream, &bmpClsid, NULL) == Gdiplus::Ok) {
+                                HGLOBAL hBmpGlobal = NULL;
+                                GetHGlobalFromStream(pBmpStream, &hBmpGlobal);
+                                if (hBmpGlobal) {
+                                    SIZE_T bmpSize = GlobalSize(hBmpGlobal);
+                                    void* pBmpData = GlobalLock(hBmpGlobal);
+                                    
+                                    // A valid BMP file is a 14-byte header followed by the pure DIB data.
+                                    // Strip the first 14 bytes to get a structurally flawless CF_DIB.
+                                    if (bmpSize > 14) {
+                                        SIZE_T dibSize = bmpSize - 14;
+                                        HGLOBAL hDIB = GlobalAlloc(GMEM_MOVEABLE, dibSize);
+                                        if (hDIB) {
+                                            memcpy(GlobalLock(hDIB), (BYTE*)pBmpData + 14, dibSize);
+                                            GlobalUnlock(hDIB);
+                                            SetClipboardData(CF_DIB, hDIB); 
+                                            // Notice we removed CF_BITMAP entirely. Windows handles it automatically now.
+                                        }
+                                    }
+                                    GlobalUnlock(hBmpGlobal);
+                                }
+                            }
+                            pBmpStream->Release();
                         }
-                        ReleaseDC(NULL, hdc);
-
-                        // <--- FIX 3: Hand the lightweight handle directly to Win+V
-                        SetClipboardData(CF_BITMAP, hBitmap); 
                     }
                     if (bitmap) delete bitmap;
                     pStream->Release();
